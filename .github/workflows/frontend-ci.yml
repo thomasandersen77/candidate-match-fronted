@@ -11,8 +11,6 @@ on:
     branches: [ "**" ]
   pull_request:
     branches: [ "main" ]
-  pull_request_target:
-    types: [ opened, synchronize, reopened ]
 
 jobs:
   # This job runs on push and PR to check for basic correctness
@@ -21,8 +19,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      # --- Steg 1: Kode-oppsett ---
+      - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Henter hele historikken for å kunne sammenligne branches
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -38,19 +39,6 @@ jobs:
 
       - name: Build application
         run: npm run build
-
-  # This job runs ONLY on pull requests to provide an AI code review
-  gemini-pull-request-review:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       # --- Steg 3: Kall Gemini API for kode-review ---
       - name: Perform Code Review with Gemini
