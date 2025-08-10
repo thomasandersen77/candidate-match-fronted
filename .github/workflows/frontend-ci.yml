@@ -5,25 +5,20 @@ permissions:
   contents: read
   pull-requests: write
 
-# This workflow runs on pushes to any branch and on pull requests targeting the main branch.
 on:
   push:
     branches: [ "**" ]
   pull_request:
     branches: [ "main" ]
-# Forcing a refresh
+
 jobs:
-  # This job runs on push and PR to check for basic correctness
+  # JOB 1: Build and test the application on every push/PR
   build:
     name: Build and Lint
     runs-on: ubuntu-latest
-
     steps:
-      # --- Steg 1: Kode-oppsett ---
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # Henter hele historikken for å kunne sammenligne branches
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -40,25 +35,16 @@ jobs:
       - name: Build application
         run: npm run build
 
-      # --- Steg 3: Kall Gemini API for kode-review ---
-      # This step has been removed as it was part of a different workflow version.
-      # The Gemini review logic should be in a separate job or workflow file
-      # that runs on pull_request_target, as shown in the first example.
-      # Combining them in a single job with 'push' and 'pull_request' triggers
-      # can lead to unexpected behavior and security risks.
-
-  # It's better to separate the PR review into its own job for clarity and security
+  # JOB 2: Perform Gemini review ONLY on pull requests
   gemini-pull-request-review:
     name: Gemini PR Review
     runs-on: ubuntu-latest
-    # This job should only run on pull requests
-    if: github.event_name == 'pull_request'
-
+    if: github.event_name == 'pull_request' # Only run on PRs
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Needed for git diff
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -69,75 +55,38 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
+          # The logic for calling Gemini API via curl
+          # This part does not use 'run-gcloud'
           PROMPT_TEMPLATE=$(cat .github/prompts/pr_review_prompt.txt)
-          # Ensure this diff command correctly captures the PR changes
           CODE_DIFF=$(git diff origin/${{ github.event.pull_request.base.ref }} HEAD)
-          
-          # Bygg payload på en sikker måte
           FULL_PROMPT="${PROMPT_TEMPLATE//\{diff\}/$CODE_DIFF}"
           JSON_PAYLOAD=$(jq -n --arg text_content "$FULL_PROMPT" \
             '{contents: [{parts: [{text: $text_content}]}]}')
-
-          # Logikk for å prøve på nytt (retry)
-          MAX_ATTEMPTS=3
-          RETRY_DELAY=5 # Sekunder
-          for ((i=1; i<=MAX_ATTEMPTS; i++)); do
-            echo "::notice::Forsøk $i av $MAX_ATTEMPTS på å kalle Gemini API..."
-          
-            # Bruk -w for å få http-status og body separat
-            HTTP_RESPONSE=$(curl -s -w "%{http_code}" -X POST \
-              "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key=$GEMINI_API_KEY" \
-              -H "Content-Type: application/json" \
-              -d "$JSON_PAYLOAD")
-          
-            HTTP_STATUS_CODE=${HTTP_RESPONSE: -3}
-            GEMINI_RESPONSE=${HTTP_RESPONSE:0:${#HTTP_RESPONSE}-3}
-          
-            if [ "$HTTP_STATUS_CODE" -eq 200 ]; then
-              echo "::notice::Suksess fra Gemini API."
-              break # Gå ut av loopen ved suksess
-            elif [ "$i" -lt "$MAX_ATTEMPTS" ]; then
-              echo "::warning::Mottok HTTP status $HTTP_STATUS_CODE. Prøver igjen om $RETRY_DELAY sekunder..."
-              echo "API-respons: $GEMINI_RESPONSE"
-              sleep $RETRY_DELAY
-            else
-              echo "::error::Feil fra Gemini API etter $MAX_ATTEMPTS forsøk. HTTP status: $HTTP_STATUS_CODE"
-              echo "$GEMINI_RESPONSE"
-              exit 1
-            fi
-          done
-
-          # Sjekk for feil i selve JSON-responsen
-          if echo "$GEMINI_RESPONSE" | jq -e '.error' > /dev/null; then
-            echo "::error::Gemini API returnerte en feilmelding:"
-            echo "$GEMINI_RESPONSE"
-            exit 1
+          HTTP_RESPONSE=$(curl -s -w "%{http_code}" -X POST \
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key=$GEMINI_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$JSON_PAYLOAD")
+          # ... rest of the script ...
+          HTTP_STATUS_CODE=${HTTP_RESPONSE: -3}
+          if [ "$HTTP_STATUS_CODE" -ne 200 ]; then
+             echo "::error::Gemini API call failed with status $HTTP_STATUS_CODE"
+             exit 1
           fi
+          GEMINI_RESPONSE=${HTTP_RESPONSE:0:${#HTTP_RESPONSE}-3}
+          echo "$GEMINI_RESPONSE" | jq -r '.candidates[0].content.parts[0].text' > gemini_review.txt
 
-          # Extract the review text and save to a file
-          REVIEW_TEXT=$(echo "$GEMINI_RESPONSE" | jq -r '.candidates[0].content.parts[0].text')
-          
-          # Handle potential empty response from Gemini
-          if [ -z "$REVIEW_TEXT" ] || [ "$REVIEW_TEXT" == "null" ]; then
-            echo "::warning::Gemini returned an empty review. Skipping comment."
-            echo "EMPTY_REVIEW=true" >> $GITHUB_ENV
-          else
-            echo "$REVIEW_TEXT" > gemini_review.txt
-            echo "Gemini-review lagret i gemini_review.txt"
-          fi
-
-      # --- Steg 4: Publiser review som en kommentar på Pull Requesten ---
       - name: Comment on Pull Request
-        # Also check if the review file exists and is not empty
-        if: success() && env.EMPTY_REVIEW != 'true'
-        uses: actions/github-script@v7 # Use v7 for latest features
+        if: success()
+        uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
             const review = fs.readFileSync('gemini_review.txt', 'utf8');
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: `### 🤖 Gemini Code Review\n\n${review}`
-            });
+            if (review) {
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `### 🤖 Gemini Code Review\n\n${review}`
+              });
+            }
