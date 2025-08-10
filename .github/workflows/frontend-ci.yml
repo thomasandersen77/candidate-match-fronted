@@ -41,13 +41,37 @@ jobs:
         run: npm run build
 
       # --- Steg 3: Kall Gemini API for kode-review ---
+      # This step has been removed as it was part of a different workflow version.
+      # The Gemini review logic should be in a separate job or workflow file
+      # that runs on pull_request_target, as shown in the first example.
+      # Combining them in a single job with 'push' and 'pull_request' triggers
+      # can lead to unexpected behavior and security risks.
+
+  # It's better to separate the PR review into its own job for clarity and security
+  gemini-pull-request-review:
+    name: Gemini PR Review
+    runs-on: ubuntu-latest
+    # This job should only run on pull requests
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Needed for git diff
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+
       - name: Perform Code Review with Gemini
-        if: ${{ success() }}
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           PROMPT_TEMPLATE=$(cat .github/prompts/pr_review_prompt.txt)
-          CODE_DIFF=$(git diff origin/main...HEAD)
+          # Ensure this diff command correctly captures the PR changes
+          CODE_DIFF=$(git diff origin/${{ github.event.pull_request.base.ref }} HEAD)
           
           # Bygg payload på en sikker måte
           FULL_PROMPT="${PROMPT_TEMPLATE//\{diff\}/$CODE_DIFF}"
@@ -90,12 +114,23 @@ jobs:
             exit 1
           fi
 
-          echo "$GEMINI_RESPONSE" | jq -r '.candidates[0].content.parts[0].text' > gemini_review.txt
-          echo "Gemini-review lagret i gemini_review.txt"
+          # Extract the review text and save to a file
+          REVIEW_TEXT=$(echo "$GEMINI_RESPONSE" | jq -r '.candidates[0].content.parts[0].text')
+          
+          # Handle potential empty response from Gemini
+          if [ -z "$REVIEW_TEXT" ] || [ "$REVIEW_TEXT" == "null" ]; then
+            echo "::warning::Gemini returned an empty review. Skipping comment."
+            echo "EMPTY_REVIEW=true" >> $GITHUB_ENV
+          else
+            echo "$REVIEW_TEXT" > gemini_review.txt
+            echo "Gemini-review lagret i gemini_review.txt"
+          fi
+
       # --- Steg 4: Publiser review som en kommentar på Pull Requesten ---
       - name: Comment on Pull Request
-        if: ${{ success() && github.event_name == 'pull_request' }}
-        uses: actions/github-script@v6
+        # Also check if the review file exists and is not empty
+        if: success() && env.EMPTY_REVIEW != 'true'
+        uses: actions/github-script@v7 # Use v7 for latest features
         with:
           script: |
             const fs = require('fs');
