@@ -1,8 +1,5 @@
 # .github/workflows/frontend-ci.yml
 name: Frontend CI
-permissions:
-  contents: read
-  pull-requests: write
 
 # This workflow runs on pushes to any branch and on pull requests targeting the main branch.
 on:
@@ -52,6 +49,7 @@ jobs:
           FULL_PROMPT="${PROMPT_TEMPLATE//\{diff\}/$CODE_DIFF}"
           JSON_PAYLOAD=$(jq -n --arg text_content "$FULL_PROMPT" \
             '{contents: [{parts: [{text: $text_content}]}]}')
+
           # Logikk for å prøve på nytt (retry)
           MAX_ATTEMPTS=3
           RETRY_DELAY=5 # Sekunder
@@ -80,12 +78,14 @@ jobs:
               exit 1
             fi
           done
+
           # Sjekk for feil i selve JSON-responsen
           if echo "$GEMINI_RESPONSE" | jq -e '.error' > /dev/null; then
             echo "::error::Gemini API returnerte en feilmelding:"
             echo "$GEMINI_RESPONSE"
             exit 1
           fi
+
           echo "$GEMINI_RESPONSE" | jq -r '.candidates[0].content.parts[0].text' > gemini_review.txt
           echo "Gemini-review lagret i gemini_review.txt"
       # --- Steg 4: Publiser review som en kommentar på Pull Requesten ---
